@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const admin = require("firebase-admin");
 
-const API_URL = process.env.API_URL || "https://gag.gg/api/seed-restock";
+const API_URL = process.env.API_URL || process.env.STOCK_API_URL || "https://gag.gg/api/seed-restock";
 const RESTOCK_SECONDS = Number(process.env.RESTOCK_SECONDS || 300);
 const POLL_OFFSET_SECONDS = Number(process.env.POLL_OFFSET_SECONDS || 3);
 const RETRY_ATTEMPTS = Number(process.env.RETRY_ATTEMPTS || 4);
@@ -45,18 +45,30 @@ function topicForSlug(slug) {
 function initFirebase() {
   if (admin.apps.length > 0) return;
 
+  const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+
+  if (rawJson && rawJson.trim().length > 0) {
+    const parsed = JSON.parse(rawJson);
+    admin.initializeApp({
+      credential: admin.credential.cert(parsed)
+    });
+    console.log("Firebase initialized with FIREBASE_SERVICE_ACCOUNT_JSON.");
+    return;
+  }
+
   const file = process.env.FIREBASE_SERVICE_ACCOUNT || "serviceAccountKey.json";
   const filePath = path.isAbsolute(file) ? file : path.join(__dirname, file);
 
   if (fs.existsSync(filePath)) {
     const serviceAccount = require(filePath);
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
     console.log("Firebase initialized with service account file.");
     return;
   }
 
-  admin.initializeApp({ credential: admin.credential.applicationDefault() });
-  console.log("Firebase initialized with application default credentials.");
+  throw new Error("Firebase credentials missing. Add FIREBASE_SERVICE_ACCOUNT_JSON in Railway variables or add backend/serviceAccountKey.json locally.");
 }
 
 function loadState() {
@@ -89,17 +101,20 @@ async function fetchStock() {
 
 async function fetchStockWithRetries() {
   let lastError = null;
+
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
     try {
       return await fetchStock();
     } catch (error) {
       lastError = error;
       console.warn(`Stock fetch failed attempt ${attempt}/${RETRY_ATTEMPTS}:`, error.message);
+
       if (attempt < RETRY_ATTEMPTS) {
         await sleep(RETRY_DELAY_SECONDS * 1000);
       }
     }
   }
+
   throw lastError || new Error("Stock fetch failed.");
 }
 
@@ -118,7 +133,10 @@ function notificationMessage(seed, window, test = false) {
       : `${seed.name} is showing as in stock.`;
 
   return {
-    notification: { title, body },
+    notification: {
+      title,
+      body
+    },
     android: {
       priority: "high",
       notification: {
@@ -143,6 +161,7 @@ function notificationMessage(seed, window, test = false) {
 
 async function sendSeedNotification(seed, window) {
   const topic = topicForSlug(seed.slug);
+
   const message = {
     topic,
     ...notificationMessage(seed, window, false)
@@ -154,31 +173,49 @@ async function sendSeedNotification(seed, window) {
 
 async function sendTopicTest(topicArg) {
   initFirebase();
+
   const topic = String(topicArg || "").trim();
-  if (!topic) throw new Error("Usage: npm run test:topic seed_tulip");
-  const slug = topic.startsWith("seed_") ? topic.substring("seed_".length).replace(/_/g, "-") : topic.replace(/_/g, "-");
+
+  if (!topic) {
+    throw new Error("Usage: npm run test:topic seed_tulip");
+  }
+
+  const slug = topic.startsWith("seed_")
+    ? topic.substring("seed_".length).replace(/_/g, "-")
+    : topic.replace(/_/g, "-");
+
   const seed = SEEDS.find(item => item.slug === slug) || SEEDS[0];
+
   const id = await admin.messaging().send({
     topic: topic.startsWith("seed_") ? topic : topicForSlug(seed.slug),
     ...notificationMessage(seed, Date.now(), true)
   });
+
   console.log(`Test topic notification sent: ${id}`);
 }
 
 async function sendTokenTest(token) {
   initFirebase();
+
   const cleanToken = String(token || "").trim();
-  if (!cleanToken) throw new Error("Usage: npm run test:token YOUR_FCM_TOKEN");
+
+  if (!cleanToken) {
+    throw new Error("Usage: npm run test:token YOUR_FCM_TOKEN");
+  }
+
   const seed = SEEDS[0];
+
   const id = await admin.messaging().send({
     token: cleanToken,
     ...notificationMessage(seed, Date.now(), true)
   });
+
   console.log(`Test token notification sent: ${id}`);
 }
 
 async function checkOnce({ force = false } = {}) {
   initFirebase();
+
   const state = loadState();
   const data = await fetchStockWithRetries();
   const window = Number(data.window || 0);
@@ -198,10 +235,12 @@ async function checkOnce({ force = false } = {}) {
 
   if (inStock.length === 0) {
     console.log(`Window ${window}: no seeds in stock.`);
+
     if (SEND_EMPTY_RESTOCK || force) {
       state.lastWindow = window;
       saveState(state);
     }
+
     return;
   }
 
@@ -225,22 +264,34 @@ function msUntilNextPoll() {
 
 function schedule() {
   const wait = msUntilNextPoll();
+
   console.log(`Next stock check in ${Math.round(wait / 1000)}s.`);
+
   setTimeout(async () => {
     try {
       await checkOnce();
     } catch (error) {
       console.error("Stock check failed:", error);
     }
+
     schedule();
   }, wait);
 }
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args[0] === "--test-topic") return sendTopicTest(args[1]);
-  if (args[0] === "--test-token") return sendTokenTest(args[1]);
-  if (args.includes("--once")) return checkOnce({ force: args.includes("--force") });
+
+  if (args[0] === "--test-topic") {
+    return sendTopicTest(args[1]);
+  }
+
+  if (args[0] === "--test-token") {
+    return sendTokenTest(args[1]);
+  }
+
+  if (args.includes("--once")) {
+    return checkOnce({ force: args.includes("--force") });
+  }
 
   initFirebase();
   schedule();
