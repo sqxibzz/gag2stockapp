@@ -1,0 +1,21 @@
+{
+  "name": "gag2-live-stocks-backend",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Firebase push notification backend for Grow A Garden 2 Live Stocks",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "check": "node index.js --once",
+    "check:force": "node index.js --once --force",
+    "test:topic": "node index.js --test-topic",
+    "test:token": "node index.js --test-token"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "firebase-admin": "^13.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
