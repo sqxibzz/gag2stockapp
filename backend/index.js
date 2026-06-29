@@ -4,30 +4,60 @@ const fs = require("fs");
 const path = require("path");
 const admin = require("firebase-admin");
 
-const API_URL = process.env.API_URL || process.env.STOCK_API_URL || "https://grow-a-garden-2-tracker.onrender.com/api/stock";
+const SEED_API_URL = process.env.SEED_API_URL || process.env.SEEDS_API_URL || "https://gag.gg/api/seed-restock";
+const TRACKER_API_URL = process.env.GEAR_API_URL || process.env.TRACKER_API_URL || process.env.STOCK_API_URL || process.env.API_URL || "https://grow-a-garden-2-tracker.onrender.com/api/stock";
 const RESTOCK_SECONDS = Number(process.env.RESTOCK_SECONDS || 300);
 const POLL_OFFSET_SECONDS = Number(process.env.POLL_OFFSET_SECONDS || 3);
 const RETRY_ATTEMPTS = Number(process.env.RETRY_ATTEMPTS || 4);
 const RETRY_DELAY_SECONDS = Number(process.env.RETRY_DELAY_SECONDS || 5);
-const USER_AGENT = process.env.USER_AGENT || "GrowAGarden2LiveStocksBackend/1.2";
+const USER_AGENT = process.env.USER_AGENT || "GrowAGarden2LiveStocksBackend/1.3";
 const SEND_EMPTY_RESTOCK = String(process.env.SEND_EMPTY_RESTOCK || "false").toLowerCase() === "true";
 const STATE_FILE = path.join(__dirname, "state.json");
 
 const STOCK_CATEGORIES = [
   {
-    apiKey: "SeedShop_Normal",
+    source: "seed",
+    apiKey: "seeds",
     restockKey: "SeedShop",
     topicPrefix: "seed",
     label: "Seeds",
-    singular: "seed"
+    singular: "seed",
+    url: SEED_API_URL
   },
   {
+    source: "tracker",
     apiKey: "GearShop",
     restockKey: "GearShop",
     topicPrefix: "gear",
     label: "Gear",
-    singular: "gear"
+    singular: "gear",
+    url: TRACKER_API_URL
   }
+];
+
+const SEEDS = [
+  { slug: "tulip", name: "Tulip", rarity: "Uncommon" },
+  { slug: "tomato", name: "Tomato", rarity: "Uncommon" },
+  { slug: "apple", name: "Apple", rarity: "Uncommon" },
+  { slug: "bamboo", name: "Bamboo", rarity: "Rare" },
+  { slug: "corn", name: "Corn", rarity: "Rare" },
+  { slug: "cactus", name: "Cactus", rarity: "Rare" },
+  { slug: "pineapple", name: "Pineapple", rarity: "Rare" },
+  { slug: "mushroom", name: "Mushroom", rarity: "Epic" },
+  { slug: "green-bean", name: "Green Bean", rarity: "Epic" },
+  { slug: "banana", name: "Banana", rarity: "Epic" },
+  { slug: "grape", name: "Grape", rarity: "Epic" },
+  { slug: "coconut", name: "Coconut", rarity: "Epic" },
+  { slug: "mango", name: "Mango", rarity: "Epic" },
+  { slug: "dragon-fruit", name: "Dragon Fruit", rarity: "Legendary" },
+  { slug: "acorn", name: "Acorn", rarity: "Legendary" },
+  { slug: "cherry", name: "Cherry", rarity: "Legendary" },
+  { slug: "sunflower", name: "Sunflower", rarity: "Legendary" },
+  { slug: "venus-fly-trap", name: "Venus Fly Trap", rarity: "Mythic" },
+  { slug: "pomegranate", name: "Pomegranate", rarity: "Mythic" },
+  { slug: "poison-apple", name: "Poison Apple", rarity: "Mythic" },
+  { slug: "moon-bloom", name: "Moon Bloom", rarity: "Super" },
+  { slug: "dragons-breath", name: "Dragon's Breath", rarity: "Super" }
 ];
 
 function slugifyName(name) {
@@ -43,6 +73,10 @@ function nameFromSlug(slug) {
   return String(slug || "")
     .replace(/_/g, " ")
     .replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
+function seedForName(name) {
+  return SEEDS.find(seed => seed.name.toLowerCase() === String(name || "").toLowerCase());
 }
 
 function topicForSlug(category, slug) {
@@ -122,8 +156,8 @@ async function sleep(ms) {
   await new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function fetchStock() {
-  const response = await fetch(API_URL, {
+async function fetchJson(url) {
+  const response = await fetch(url, {
     headers: { "user-agent": USER_AGENT }
   });
 
@@ -134,15 +168,15 @@ async function fetchStock() {
   return await response.json();
 }
 
-async function fetchStockWithRetries() {
+async function fetchStockWithRetries(category) {
   let lastError = null;
 
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
     try {
-      return await fetchStock();
+      return await fetchJson(category.url);
     } catch (error) {
       lastError = error;
-      console.warn(`Stock fetch failed attempt ${attempt}/${RETRY_ATTEMPTS}:`, error.message);
+      console.warn(`${category.label} fetch failed attempt ${attempt}/${RETRY_ATTEMPTS}:`, error.message);
 
       if (attempt < RETRY_ATTEMPTS) {
         await sleep(RETRY_DELAY_SECONDS * 1000);
@@ -150,10 +184,15 @@ async function fetchStockWithRetries() {
     }
   }
 
-  throw lastError || new Error("Stock fetch failed.");
+  throw lastError || new Error(`${category.label} stock fetch failed.`);
 }
 
 function categoryWindow(data, category) {
+  if (category.source === "seed") {
+    const window = Number(data?.window || 0);
+    return window > 0 ? window : Math.floor(Date.now() / 1000);
+  }
+
   const restock = data?.restockTimes?.[category.restockKey] || {};
   const last = Number(restock.last || 0);
   const next = Number(restock.next || 0);
@@ -168,21 +207,46 @@ function categoryWindow(data, category) {
   return Math.floor(Date.now() / 1000);
 }
 
-function shopItems(data, category) {
+function seedItems(data) {
+  const items = Array.isArray(data?.seeds) ? data.seeds : [];
+
+  return items
+    .filter(item => item && item.name)
+    .map(item => {
+      const seed = seedForName(item.name);
+      return {
+        name: seed?.name || String(item.name),
+        slug: seed?.slug || slugifyName(item.name),
+        rarity: seed?.rarity || "Unknown",
+        price: "",
+        stock: Number(item.lastQty || 0),
+        inStock: item.inStockNow === true
+      };
+    });
+}
+
+function trackerItems(data, category) {
   const items = data?.shops?.[category.apiKey];
 
   if (!Array.isArray(items)) return [];
 
   return items
     .filter(item => item && item.name)
-    .map(item => ({
-      name: String(item.name),
-      slug: slugifyName(item.name),
-      rarity: item.rarity || "Unknown",
-      price: item.price || "",
-      stock: Number(item.stock || 0),
-      image: item.image || null
-    }));
+    .map(item => {
+      const stock = Number(item.stock || 0);
+      return {
+        name: String(item.name),
+        slug: slugifyName(item.name),
+        rarity: item.rarity || "Unknown",
+        price: item.price || "",
+        stock,
+        inStock: stock > 0
+      };
+    });
+}
+
+function shopItems(data, category) {
+  return category.source === "seed" ? seedItems(data) : trackerItems(data, category);
 }
 
 function notificationMessage(category, item, window, test = false) {
@@ -305,10 +369,10 @@ async function checkOnce({ force = false } = {}) {
   initFirebase();
 
   const state = loadState();
-  const data = await fetchStockWithRetries();
   let stateChanged = false;
 
   for (const category of STOCK_CATEGORIES) {
+    const data = await fetchStockWithRetries(category);
     const window = categoryWindow(data, category);
     const lastWindow = lastWindowForCategory(state, category);
 
@@ -317,7 +381,7 @@ async function checkOnce({ force = false } = {}) {
       continue;
     }
 
-    const inStock = shopItems(data, category).filter(item => item.stock > 0);
+    const inStock = shopItems(data, category).filter(item => item.inStock === true);
 
     if (inStock.length === 0) {
       console.log(`${category.label} window ${window}: no items in stock.`);
